@@ -16,6 +16,9 @@ RENDER_EXTERNAL_HOSTNAME = os.environ.get("RENDER_EXTERNAL_HOSTNAME", "")
 WEBHOOK_URL = f"https://{RENDER_EXTERNAL_HOSTNAME}/webhook/{TOKEN}" if RENDER_EXTERNAL_HOSTNAME else ""
 
 ADMIN_USERNAME = "Hobabadmin"
+# ⚠️ حتما شناسه عددی (Chat ID) بله خود را جایگزین کنید
+ADMIN_ID = 123456789  
+
 BALANCE_BOT_LINK = "https://ble.ir/reportvolume_bot"
 
 CARD_NUMBER = "5022-2913-3683-0904"
@@ -196,9 +199,13 @@ def edit_message_text(chat_id, message_id, text, reply_markup=None):
         return None
 
 
-def answer_callback_query(callback_query_id):
+def answer_callback_query(callback_query_id, text=None):
+    payload = {"callback_query_id": callback_query_id}
+    if text:
+        payload["text"] = text
+        payload["show_alert"] = True
     try:
-        requests.post(f"{BASE_URL}/answerCallbackQuery", json={"callback_query_id": callback_query_id}, timeout=5)
+        requests.post(f"{BASE_URL}/answerCallbackQuery", json=payload, timeout=5)
     except Exception as e:
         print(f"answerCallbackQuery exception: {e}", file=sys.stderr)
 
@@ -275,17 +282,15 @@ def process_update(update):
         msg = cb.get("message", {})
         msg_id = msg.get("message_id")
         chat_id = msg.get("chat", {}).get("id")
-
-        if cb_id:
-            answer_callback_query(cb_id)
-
-        if not chat_id:
-            return
+        from_user = cb.get("from", {})
+        user_fullname = f"{from_user.get('first_name', '')} {from_user.get('last_name', '')}".strip() or "کاربر"
 
         if cb_data == "plans":
+            answer_callback_query(cb_id)
             edit_message_text(chat_id, msg_id, "💵 تعرفه اشتراک‌های طرح پرو:\n\nنوع اشتراک رو انتخاب کن:", category_keyboard())
 
         elif cb_data == "all_prices":
+            answer_callback_query(cb_id)
             kb = {"inline_keyboard": [
                 [{"text": "🛒 ثبت سفارش", "callback_data": "plans"}],
                 [{"text": "🔙 بازگشت", "callback_data": "plans"}]
@@ -293,12 +298,14 @@ def process_update(update):
             edit_message_text(chat_id, msg_id, get_full_price_list_text(), kb)
 
         elif cb_data.startswith("cat_"):
+            answer_callback_query(cb_id)
             cat_key = cb_data.replace("cat_", "")
             if cat_key in PLANS:
                 cat = PLANS[cat_key]
                 edit_message_text(chat_id, msg_id, f"{cat['title']}\n\nمدت اشتراک رو انتخاب کن:", subcategory_keyboard(cat_key))
 
         elif cb_data.startswith("sub_"):
+            answer_callback_query(cb_id)
             parts = cb_data.split("_")
             if len(parts) == 3:
                 cat_key, sub_key = parts[1], parts[2]
@@ -309,10 +316,10 @@ def process_update(update):
                     edit_message_text(chat_id, msg_id, text, items_keyboard(cat_key, sub_key))
 
         elif cb_data.startswith("buy_"):
+            answer_callback_query(cb_id)
             plan_id = cb_data.replace("buy_", "")
             plan, cat_key, sub_key = find_plan(plan_id)
             if plan:
-                add_user_service(chat_id, plan['label'])
                 text = (
                     f"✅ پلن انتخابی: {plan['label']}\n"
                     f"💰 مبلغ: {price_toman_text(plan['price'])}\n"
@@ -320,30 +327,71 @@ def process_update(update):
                     f"لطفاً مبلغ رو به شماره کارت زیر واریز کن:\n\n"
                     f"💳 `{CARD_NUMBER}`\n"
                     f"👤 به نام: {CARD_HOLDER}\n\n"
-                    f"⚠️ **توجه:** لطفاً عکس رسید پرداخت رو به ربات نفرستید.\n"
-                    f"رسید واریز رو مستقیماً برای مدیریت بفرستید:\n"
-                    f"👈 https://ble.ir/{ADMIN_USERNAME}"
+                    f"⚠️ پس از پرداخت کارت به کارت، حتما رسید را ارسال کرده و روی دکمه زیر کلیک کنید تا سفارش شما ثبت شود:"
                 )
-                back_kb = {"inline_keyboard": [
-                    [{"text": "💬 ارسال رسید به مدیریت", "url": f"https://ble.ir/{ADMIN_USERNAME}"}],
+                
+                # دکمه برای ارسال اعلان خرید به ادمین
+                req_kb = {"inline_keyboard": [
+                    [{"text": "📩 اعلام پرداخت به مدیریت", "callback_data": f"notify_{plan_id}"}],
+                    [{"text": "💬 ارسال مستقیم رسید به مدیریت", "url": f"https://ble.ir/{ADMIN_USERNAME}"}],
                     [{"text": "🔙 بازگشت", "callback_data": f"sub_{cat_key}_{sub_key}"}]
                 ]}
-                edit_message_text(chat_id, msg_id, text, back_kb)
+                edit_message_text(chat_id, msg_id, text, req_kb)
+
+        elif cb_data.startswith("notify_"):
+            plan_id = cb_data.replace("notify_", "")
+            plan, _, _ = find_plan(plan_id)
+            if plan and ADMIN_ID:
+                # ارسال اعلان به ادمین همراه با دکمه تایید سریع
+                admin_text = (
+                    f"🔔 **درخواست سفارش جدید!**\n\n"
+                    f"👤 **کاربر:** {user_fullname}\n"
+                    f"🆔 **آیدی عددی:** `{chat_id}`\n"
+                    f"📦 **پلن انتخابی:** {plan['label']}\n"
+                    f"💰 **مبلغ:** {price_toman_text(plan['price'])}\n"
+                )
+                admin_kb = {"inline_keyboard": [
+                    [{"text": "✅ تایید پرداخت و فعال‌سازی", "callback_data": f"approve_{chat_id}_{plan_id}"}]
+                ]}
+                send_message(ADMIN_ID, admin_text, admin_kb)
+
+                answer_callback_query(cb_id, "✅ درخواست شما به مدیریت ارسال شد. پس از تایید رسید، سرویس فعال می‌شود.")
+                edit_message_text(chat_id, msg_id, "✅ درخواست تایید شما برای مدیریت ارسال شد.\nبه محض تایید، سرویس در بخش «سرویس‌های من» فعال خواهد شد.", {"inline_keyboard": [[{"text": "🏠 منوی اصلی", "callback_data": "back"}]]})
+
+        elif cb_data.startswith("approve_"):
+            # بخش تایید پرداختی توسط ادمین
+            parts = cb_data.split("_")
+            if len(parts) == 3:
+                target_user_id = int(parts[1])
+                plan_id = parts[2]
+                plan, _, _ = find_plan(plan_id)
+                
+                if plan:
+                    add_user_service(target_user_id, plan['label'])
+                    answer_callback_query(cb_id, "سرویس فعال شد!")
+                    
+                    # ویرایش پیام ادمین پس از کلیک
+                    edit_message_text(chat_id, msg_id, f"✅ **این سفارش تایید شد.**\n\n📦 سرویس «{plan['label']}» برای کاربر `{target_user_id}` فعال گردید.")
+                    
+                    # اطلاع‌رسانی به کاربر
+                    send_message(target_user_id, f"🎉 **سفارش شما تایید شد!**\n\nسرویس «{plan['label']}» فعال گردید و اکنون در بخش «سرویس‌های من» قابل مشاهده است.")
 
         elif cb_data == "my_services":
+            answer_callback_query(cb_id)
             services = get_user_services(chat_id)
             if not services:
                 text = "📦 هنوز هیچ سرویس فعالی برای شما ثبت نشده است."
             else:
                 text_lines = ["📦 **سرویس‌های شما:**\n"]
                 for label, activated_at in services:
-                    text_lines.append(f"🔹 **اشتراک:** {label}\n⏱ **زمان ثبت/فعال‌سازی:** {activated_at}\n---")
+                    text_lines.append(f"🔹 **اشتراک:** {label}\n⏱ **زمان فعال‌سازی:** {activated_at}\n---")
                 text = "\n".join(text_lines)
 
             kb = {"inline_keyboard": [[{"text": "🔙 بازگشت", "callback_data": "back"}]]}
             edit_message_text(chat_id, msg_id, text, kb)
 
         elif cb_data == "support":
+            answer_callback_query(cb_id)
             kb = {"inline_keyboard": [
                 [{"text": "💬 ارتباط با پشتیبانی", "url": f"https://ble.ir/{ADMIN_USERNAME}"}],
                 [{"text": "🔙 بازگشت", "callback_data": "back"}]
@@ -351,6 +399,7 @@ def process_update(update):
             edit_message_text(chat_id, msg_id, "🎧 برای پشتیبانی، روی دکمه‌ی زیر بزن تا مستقیم چت باز بشه:", kb)
 
         elif cb_data == "check_balance":
+            answer_callback_query(cb_id)
             kb = {"inline_keyboard": [
                 [{"text": "📊 چک کردن مانده", "url": BALANCE_BOT_LINK}],
                 [{"text": "🔙 بازگشت", "callback_data": "back"}]
@@ -358,6 +407,7 @@ def process_update(update):
             edit_message_text(chat_id, msg_id, "📊 برای چک کردن مانده‌ی سرویست روی دکمه‌ی زیر بزن:", kb)
 
         elif cb_data == "back":
+            answer_callback_query(cb_id)
             edit_message_text(chat_id, msg_id, "منوی اصلی:", main_menu_inline())
 
 
