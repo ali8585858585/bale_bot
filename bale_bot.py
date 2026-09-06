@@ -1,3 +1,4 @@
+import re
 import sqlite3
 import os
 import sys
@@ -22,6 +23,34 @@ BALANCE_BOT_LINK = "https://t.me/reportvolume_bot"
 
 CARD_NUMBER = "5022-2913-3683-0904"
 CARD_HOLDER = "علی باقری فرد"
+
+# الگوی نام کاربری معتبر سرور جهت تمدید: provpn + عدد انگلیسی (مثال: provpn27)
+RENEWAL_USERNAME_PATTERN = re.compile(r"^provpn[0-9]+$")
+
+# متن دکمه‌های کیبورد ثابت
+BUY_BUTTON_TEXT = "🛒 خرید اشتراک"
+RENEW_BUTTON_TEXT = "🔄 تمدید سرور"
+MY_SERVICES_BUTTON_TEXT = "📦 سرویس‌های من"
+CHECK_BALANCE_BUTTON_TEXT = "📊 چک کردن مانده سرویس"
+SUPPORT_BUTTON_TEXT = "🎧 پشتیبانی"
+HOME_BUTTON_TEXT = "🏠 منوی اصلی"
+
+# ---------------------------------------------------------------------------
+# وضعیت موقت هر کاربر (چون این ربات به‌صورت وب‌هوک و بدون حافظه‌ی مکالمه‌ست،
+# وضعیت در‌انتظارِ نام‌کاربری تمدید را در یک دیکشنری در حافظه نگه می‌داریم)
+# ---------------------------------------------------------------------------
+USER_STATE = {}
+
+
+def get_state(chat_id):
+    return USER_STATE.setdefault(
+        chat_id, {"awaiting_username": False, "username_attempts": 0, "renewal_username": None}
+    )
+
+
+def reset_state(chat_id):
+    USER_STATE[chat_id] = {"awaiting_username": False, "username_attempts": 0, "renewal_username": None}
+
 
 _EN2FA = str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
 
@@ -213,8 +242,13 @@ def answer_callback_query(callback_query_id, text=None):
 # کیبوردها
 # ---------------------------------------------------------------------------
 def persistent_keyboard():
+    # تمام آیتم‌های منوی اصلی در کنار «منوی اصلی» به صورت کیبورد ثابت نمایش داده می‌شوند
     return {
-        "keyboard": [[{"text": "🏠 منوی اصلی"}]],
+        "keyboard": [
+            [{"text": BUY_BUTTON_TEXT}, {"text": RENEW_BUTTON_TEXT}],
+            [{"text": MY_SERVICES_BUTTON_TEXT}, {"text": CHECK_BALANCE_BUTTON_TEXT}],
+            [{"text": SUPPORT_BUTTON_TEXT}, {"text": HOME_BUTTON_TEXT}],
+        ],
         "resize_keyboard": True
     }
 
@@ -223,6 +257,7 @@ def main_menu_inline():
     return {
         "inline_keyboard": [
             [{"text": "🛒 خرید اشتراک", "callback_data": "plans"}],
+            [{"text": "🔄 تمدید سرور", "callback_data": "renew"}],
             [{"text": "📦 سرویس‌های من", "callback_data": "my_services"}],
             [{"text": "📊 چک کردن مانده سرویس", "callback_data": "check_balance"}],
             [{"text": "🎧 پشتیبانی", "callback_data": "support"}]
@@ -260,6 +295,73 @@ def items_keyboard(cat_key, sub_key):
     return {"inline_keyboard": rows}
 
 
+def build_my_services_text(chat_id):
+    services = get_user_services(chat_id)
+    if not services:
+        return "📦 هنوز هیچ سرویس فعالی برای شما ثبت نشده است."
+    text_lines = ["📦 **سرویس‌های شما:**\n"]
+    for label, activated_at in services:
+        text_lines.append(f"🔹 **اشتراک:** {label}\n⏱ **زمان فعال‌سازی:** {activated_at}\n---")
+    return "\n".join(text_lines)
+
+
+def start_renewal_flow(chat_id, message_id=None):
+    state = get_state(chat_id)
+    state["awaiting_username"] = True
+    state["username_attempts"] = 0
+
+    text = (
+        "🔄 تمدید سرور\n\n"
+        "لطفاً نام کاربری سرور OpenConnect خود را همینجا ارسال کنید.\n\n"
+        "📌 فرمت صحیح: کلمه‌ی provpn به همراه یک عدد انگلیسی، مثلاً:\n"
+        "provpn27 ✅"
+    )
+
+    if message_id:
+        kb = {"inline_keyboard": [[{"text": "🔙 بازگشت", "callback_data": "back"}]]}
+        edit_message_text(chat_id, message_id, text, kb)
+    else:
+        send_message(chat_id, text, persistent_keyboard())
+
+
+def handle_renewal_username(chat_id, text):
+    """اگر ربات منتظر دریافت نام کاربری تمدید سرور از این کاربر باشد، پیام متنی را بررسی می‌کند.
+    خروجی True یعنی پیام مربوط به این جریان بوده و پردازش شد."""
+    state = get_state(chat_id)
+    if not state.get("awaiting_username"):
+        return False
+
+    username = (text or "").strip()
+
+    if RENEWAL_USERNAME_PATTERN.match(username):
+        state["awaiting_username"] = False
+        state["username_attempts"] = 0
+        state["renewal_username"] = username
+        send_message(chat_id, f"✅ نام کاربری شما با موفقیت تایید شد! ({username})")
+        send_message(chat_id, "لطفاً نوع اشتراک مورد نظر خود جهت تمدید را انتخاب کنید:", category_keyboard())
+        return True
+
+    attempts = state.get("username_attempts", 0) + 1
+    state["username_attempts"] = attempts
+
+    base_text = (
+        "❌ نام کاربری شما اشتباه است!\n\n"
+        "لطفاً دوباره با فرمت صحیح ارسال کنید، مثلاً:\n"
+        "provpn27"
+    )
+
+    if attempts >= 2:
+        kb = {"inline_keyboard": [[{"text": "💬 ارتباط با پشتیبانی", "url": f"https://ble.ir/{ADMIN_USERNAME}"}]]}
+        send_message(
+            chat_id,
+            base_text + "\n\nاگر در تایید نام کاربری مشکلی برایتان پیش آمده، لطفاً به پشتیبانی پیام دهید.",
+            kb,
+        )
+    else:
+        send_message(chat_id, base_text)
+    return True
+
+
 # ---------------------------------------------------------------------------
 # پردازش پیام‌ها
 # ---------------------------------------------------------------------------
@@ -269,7 +371,8 @@ def process_update(update):
         chat_id = message.get("chat", {}).get("id")
         text = message.get("text", "").strip()
 
-        if text in ["/start", "🏠 منوی اصلی", "start"]:
+        if text in ["/start", HOME_BUTTON_TEXT, "start"]:
+            reset_state(chat_id)
             send_message(chat_id, "سلام، جهت خرید یا تمدید سرور در خدمتم😉", persistent_keyboard())
             send_message(chat_id, "یکی از گزینه‌های زیر رو انتخاب کن:", main_menu_inline())
             return
@@ -277,6 +380,46 @@ def process_update(update):
         if text == "/myid":
             send_message(chat_id, f"🆔 شناسه (Chat ID) شما در بله:\n`{chat_id}`")
             return
+
+        if text == "/cancel":
+            state = get_state(chat_id)
+            had_active_flow = state.get("awaiting_username") is True
+            reset_state(chat_id)
+            reply = "❌ فرآیند جاری لغو شد و از آن خارج شدید." if had_active_flow else "چیزی برای لغو کردن وجود نداشت."
+            send_message(chat_id, reply, persistent_keyboard())
+            send_message(chat_id, "🏠 منوی اصلی:", main_menu_inline())
+            return
+
+        if text == BUY_BUTTON_TEXT:
+            reset_state(chat_id)
+            send_message(chat_id, "💵 تعرفه اشتراک‌های طرح پرو:\n\nنوع اشتراک رو انتخاب کن:", category_keyboard())
+            return
+
+        if text == RENEW_BUTTON_TEXT:
+            start_renewal_flow(chat_id)
+            return
+
+        if text == MY_SERVICES_BUTTON_TEXT:
+            reset_state(chat_id)
+            send_message(chat_id, build_my_services_text(chat_id))
+            return
+
+        if text == CHECK_BALANCE_BUTTON_TEXT:
+            reset_state(chat_id)
+            kb = {"inline_keyboard": [[{"text": "📊 چک کردن مانده", "url": BALANCE_BOT_LINK}]]}
+            send_message(chat_id, "📊 برای چک کردن مانده‌ی سرویست روی دکمه‌ی زیر بزن:", kb)
+            return
+
+        if text == SUPPORT_BUTTON_TEXT:
+            reset_state(chat_id)
+            kb = {"inline_keyboard": [[{"text": "💬 ارتباط با پشتیبانی", "url": f"https://ble.ir/{ADMIN_USERNAME}"}]]}
+            send_message(chat_id, "🎧 برای پشتیبانی، روی دکمه‌ی زیر بزن تا مستقیم چت باز بشه:", kb)
+            return
+
+        # هندلر عمومی متن: بررسی نام کاربری تمدید سرور (کمترین اولویت)
+        if chat_id is not None:
+            handle_renewal_username(chat_id, text)
+        return
 
     cb = update.get("callback_query")
     if cb:
@@ -297,6 +440,9 @@ def process_update(update):
 
         if cb_data == "plans":
             edit_message_text(chat_id, msg_id, "💵 تعرفه اشتراک‌های طرح پرو:\n\nنوع اشتراک رو انتخاب کن:", category_keyboard())
+
+        elif cb_data == "renew":
+            start_renewal_flow(chat_id, message_id=msg_id)
 
         elif cb_data == "all_prices":
             kb = {"inline_keyboard": [
@@ -325,7 +471,12 @@ def process_update(update):
             plan_id = cb_data.replace("buy_", "")
             plan, cat_key, sub_key = find_plan(plan_id)
             if plan:
+                state = get_state(chat_id)
+                renewal_username = state.get("renewal_username")
+                renewal_note = f"🔄 نام کاربری جهت تمدید: {renewal_username}\n\n" if renewal_username else ""
+
                 text = (
+                    f"{renewal_note}"
                     f"✅ پلن انتخابی: {plan['label']}\n"
                     f"💰 مبلغ: {price_toman_text(plan['price'])}\n"
                     f"💱 معادل این میشه: {price_rial_text(plan['price'])}\n\n"
@@ -342,10 +493,12 @@ def process_update(update):
                 edit_message_text(chat_id, msg_id, text, back_kb)
 
                 # ارسال درخواست تایید برای شما (ادمین) همراه با دکمه تایید
+                admin_renewal_line = f"🔄 **نام کاربری جهت تمدید:** `{renewal_username}`\n" if renewal_username else ""
                 admin_msg = (
                     f"🔔 **درخواست سفارش جدید**\n\n"
                     f"👤 **کاربر:** {first_name} (@{username if username else 'بدون_نام_کاربری'})\n"
                     f"🆔 **Chat ID:** `{chat_id}`\n"
+                    f"{admin_renewal_line}"
                     f"📦 **پلن انتخابی:** {plan['label']}\n"
                     f"💰 **مبلغ:** {price_toman_text(plan['price'])}\n\n"
                     f"پس از بررسی و واریز وجه، روی دکمه زیر کلیک کنید تا سرویس برای این کاربر فعال شود:"
@@ -354,6 +507,8 @@ def process_update(update):
                     [{"text": "✅ تایید و فعال‌سازی سرویس", "callback_data": f"approve_{chat_id}_{plan['id']}"}]
                 ]}
                 send_message(ADMIN_CHAT_ID, admin_msg, admin_kb)
+
+                state["renewal_username"] = None
 
         # پردازش کلیک روی دکمه تایید توسط ادمین
         elif cb_data.startswith("approve_"):
@@ -384,15 +539,7 @@ def process_update(update):
                     answer_callback_query(cb_id, "سرویس با موفقیت فعال شد.")
 
         elif cb_data == "my_services":
-            services = get_user_services(chat_id)
-            if not services:
-                text = "📦 هنوز هیچ سرویس فعالی برای شما ثبت نشده است."
-            else:
-                text_lines = ["📦 **سرویس‌های شما:**\n"]
-                for label, activated_at in services:
-                    text_lines.append(f"🔹 **اشتراک:** {label}\n⏱ **زمان فعال‌سازی:** {activated_at}\n---")
-                text = "\n".join(text_lines)
-
+            text = build_my_services_text(chat_id)
             kb = {"inline_keyboard": [[{"text": "🔙 بازگشت", "callback_data": "back"}]]}
             edit_message_text(chat_id, msg_id, text, kb)
 
@@ -411,7 +558,8 @@ def process_update(update):
             edit_message_text(chat_id, msg_id, "📊 برای چک کردن مانده‌ی سرویست روی دکمه‌ی زیر بزن:", kb)
 
         elif cb_data == "back":
-            edit_message_text(chat_id, msg_id, "منوی اصلی:", main_menu_inline())
+            reset_state(chat_id)
+            edit_message_text(chat_id, msg_id, "🏠 منوی اصلی:", main_menu_inline())
 
 
 app = Flask(__name__)
