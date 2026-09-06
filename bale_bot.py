@@ -15,7 +15,10 @@ RENDER_EXTERNAL_HOSTNAME = os.environ.get("RENDER_EXTERNAL_HOSTNAME", "")
 WEBHOOK_URL = f"https://{RENDER_EXTERNAL_HOSTNAME}/webhook/{TOKEN}" if RENDER_EXTERNAL_HOSTNAME else ""
 
 ADMIN_USERNAME = "Hobabadmin"
-BALANCE_BOT_LINK = "https://ble.ir/reportvolume_bot"
+ADMIN_CHAT_ID = 52937597  # شناسه چت شما در بله جهت دریافت درخواست‌های تایید
+
+# لینک تلگرامی ربات چک مانده حجم
+BALANCE_BOT_LINK = "https://t.me/reportvolume_bot"
 
 CARD_NUMBER = "5022-2913-3683-0904"
 CARD_HOLDER = "علی باقری فرد"
@@ -195,9 +198,13 @@ def edit_message_text(chat_id, message_id, text, reply_markup=None):
         return None
 
 
-def answer_callback_query(callback_query_id):
+def answer_callback_query(callback_query_id, text=None):
+    payload = {"callback_query_id": callback_query_id}
+    if text:
+        payload["text"] = text
+        payload["show_alert"] = True
     try:
-        requests.post(f"{BASE_URL}/answerCallbackQuery", json={"callback_query_id": callback_query_id}, timeout=5)
+        requests.post(f"{BASE_URL}/answerCallbackQuery", json=payload, timeout=5)
     except Exception as e:
         print(f"answerCallbackQuery exception: {e}", file=sys.stderr)
 
@@ -267,25 +274,8 @@ def process_update(update):
             send_message(chat_id, "یکی از گزینه‌های زیر رو انتخاب کن:", main_menu_inline())
             return
 
-        # دستور مستقیم برای دریافت شناسه Chat ID
         if text == "/myid":
             send_message(chat_id, f"🆔 شناسه (Chat ID) شما در بله:\n`{chat_id}`")
-            return
-
-        # دستور ادمین برای فعال‌سازی سرویس: /add USER_ID PLAN_NAME
-        if text.startswith("/add"):
-            parts = text.split(" ", 2)
-            if len(parts) == 3:
-                target_user_id = parts[1]
-                plan_name = parts[2]
-                try:
-                    add_user_service(int(target_user_id), plan_name)
-                    send_message(chat_id, f"✅ سرویس «{plan_name}» برای کاربر {target_user_id} ثبت شد.")
-                    send_message(int(target_user_id), f"🎉 سرویس «{plan_name}» برای شما فعال شد! می‌توانید آن را در بخش «سرویس‌های من» ببینید.")
-                except Exception as e:
-                    send_message(chat_id, f"❌ خطا در ثبت: {e}")
-            else:
-                send_message(chat_id, "⚠️ فرمت صحیح:\n`/add USER_ID PLAN_NAME`")
             return
 
     cb = update.get("callback_query")
@@ -295,6 +285,9 @@ def process_update(update):
         msg = cb.get("message", {})
         msg_id = msg.get("message_id")
         chat_id = msg.get("chat", {}).get("id")
+        user_info = cb.get("from", {})
+        first_name = user_info.get("first_name", "کاربر")
+        username = user_info.get("username", "")
 
         if cb_id:
             answer_callback_query(cb_id)
@@ -339,7 +332,7 @@ def process_update(update):
                     f"لطفاً مبلغ رو به شماره کارت زیر واریز کن:\n\n"
                     f"💳 `{CARD_NUMBER}`\n"
                     f"👤 به نام: {CARD_HOLDER}\n\n"
-                    f"⚠️ **توجه:** پس از پرداخت، رسید واریز را همراه با آیدی زیر برای پشتیبانی بفرستید تا سرویس فعال شود:\n\n"
+                    f"⚠️ **توجه:** پس از پرداخت، رسید واریز را همراه با آیدی زیر برای پشتیبانی بفرستید:\n\n"
                     f"🆔 **آیدی (Chat ID) شما:** `{chat_id}`"
                 )
                 back_kb = {"inline_keyboard": [
@@ -347,6 +340,48 @@ def process_update(update):
                     [{"text": "🔙 بازگشت", "callback_data": f"sub_{cat_key}_{sub_key}"}]
                 ]}
                 edit_message_text(chat_id, msg_id, text, back_kb)
+
+                # ارسال درخواست تایید برای شما (ادمین) همراه با دکمه تایید
+                admin_msg = (
+                    f"🔔 **درخواست سفارش جدید**\n\n"
+                    f"👤 **کاربر:** {first_name} (@{username if username else 'بدون_نام_کاربری'})\n"
+                    f"🆔 **Chat ID:** `{chat_id}`\n"
+                    f"📦 **پلن انتخابی:** {plan['label']}\n"
+                    f"💰 **مبلغ:** {price_toman_text(plan['price'])}\n\n"
+                    f"پس از بررسی و واریز وجه، روی دکمه زیر کلیک کنید تا سرویس برای این کاربر فعال شود:"
+                )
+                admin_kb = {"inline_keyboard": [
+                    [{"text": "✅ تایید و فعال‌سازی سرویس", "callback_data": f"approve_{chat_id}_{plan['id']}"}]
+                ]}
+                send_message(ADMIN_CHAT_ID, admin_msg, admin_kb)
+
+        # پردازش کلیک روی دکمه تایید توسط ادمین
+        elif cb_data.startswith("approve_"):
+            parts = cb_data.split("_")
+            if len(parts) == 3:
+                target_user_id = int(parts[1])
+                plan_id = parts[2]
+                plan, _, _ = find_plan(plan_id)
+                if plan:
+                    add_user_service(target_user_id, plan['label'])
+                    
+                    # ویرایش پیام ادمین و تایید نهایی
+                    edit_message_text(
+                        chat_id, msg_id,
+                        f"✅ **سرویس فعال شد!**\n\n"
+                        f"👤 **کاربر:** `{target_user_id}`\n"
+                        f"📦 **پلن:** {plan['label']}\n"
+                        f"⏱ **زمان فعال‌سازی:** {datetime.now().strftime('%Y-%m-%d — %H:%M')}"
+                    )
+                    
+                    # اطلاع‌رسانی خودکار به کاربر
+                    send_message(
+                        target_user_id,
+                        f"🎉 **پرداخت شما تایید شد!**\n\n"
+                        f"اشتراک «{plan['label']}» با موفقیت برای شما فعال شد.\n"
+                        f"می‌توانید اطلاعات آن را در بخش «سرویس‌های من» مشاهده کنید."
+                    )
+                    answer_callback_query(cb_id, "سرویس با موفقیت فعال شد.")
 
         elif cb_data == "my_services":
             services = get_user_services(chat_id)
