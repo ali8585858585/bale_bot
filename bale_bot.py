@@ -121,7 +121,7 @@ PLANS = {
             "monthly": {
                 "title": "✨ یک ماهه",
                 "items": [
-                    {"id": "sm1", "label": "یک ماه تک کاربر ۲۰ گیگ", "price": 240},
+                    {"id": "sm1", "label": "یک ماه تک کاربر ۲۰ گیگ", "price": 260},
                     {"id": "sm2", "label": "یک ماه تک کاربر ۴۰ گیگ", "price": 420, "recommended": True},
                     {"id": "sm3", "label": "یک ماه تک کاربر ۶۰ گیگ", "price": 550},
                     {"id": "sm4", "label": "یک ماه تک کاربر ۱۰۰ گیگ", "price": 690},
@@ -130,7 +130,7 @@ PLANS = {
             "quarterly": {
                 "title": "✨ سه ماهه",
                 "items": [
-                    {"id": "sq1", "label": "سه ماه تک کاربر ۱۰۰ گیگ", "price": 990, "recommended": True},
+                    {"id": "sq1", "label": "سه ماه تک کاربر ۱۰۰ گیگ", "price": 1190, "recommended": True},
                     {"id": "sq2", "label": "سه ماه تک کاربر ۱۵۰ گیگ", "price": 1390},
                     {"id": "sq3", "label": "سه ماه تک کاربر ۱۸۰ گیگ", "price": 1590},
                 ],
@@ -143,18 +143,18 @@ PLANS = {
             "monthly": {
                 "title": "✨ یک ماهه",
                 "items": [
-                    {"id": "dm1", "label": "یک ماه دو کاربر ۴۰ گیگ", "price": 540},
-                    {"id": "dm2", "label": "یک ماه دو کاربر ۶۰ گیگ", "price": 650},
-                    {"id": "dm3", "label": "یک ماه دو کاربر ۸۰ گیگ", "price": 750, "recommended": True},
+                    {"id": "dm1", "label": "یک ماه دو کاربر ۴۰ گیگ", "price": 590},
+                    {"id": "dm2", "label": "یک ماه دو کاربر ۶۰ گیگ", "price": 720},
+                    {"id": "dm3", "label": "یک ماه دو کاربر ۸۰ گیگ", "price": 800, "recommended": True},
                     {"id": "dm4", "label": "یک ماه دو کاربر ۱۰۰ گیگ", "price": 890},
                 ],
             },
             "quarterly": {
                 "title": "✨ سه ماهه",
                 "items": [
-                    {"id": "dq1", "label": "سه ماه دو کاربر ۱۰۰ گیگ", "price": 1190},
-                    {"id": "dq2", "label": "سه ماه دو کاربر ۲۰۰ گیگ", "price": 1790},
-                    {"id": "dq3", "label": "سه ماه دو کاربر ۳۶۰ گیگ", "price": 2090, "recommended": True},
+                    {"id": "dq1", "label": "سه ماه دو کاربر ۱۰۰ گیگ", "price": 1490},
+                    {"id": "dq2", "label": "سه ماه دو کاربر ۲۰۰ گیگ", "price": 1990},
+                    {"id": "dq3", "label": "سه ماه دو کاربر ۳۶۰ گیگ", "price": 2390, "recommended": True},
                 ],
             },
         },
