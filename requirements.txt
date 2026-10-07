@@ -1,4 +1,4 @@
-Flask
-requests
-gunicorn
-psycopg[binary]
+flask==3.0.3
+requests==2.32.3
+psycopg[binary]==3.2.3
+gunicorn==23.0.0
