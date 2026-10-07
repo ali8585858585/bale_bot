@@ -1,10 +1,16 @@
-import re
-import sqlite3
 import os
-import sys
+import re
+import html
+import time
+import math
+import logging
+import psycopg
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from flask import Flask, request, jsonify
+
+logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO)
+logger = logging.getLogger("hobab-bale-bot")
 
 # ---------------------------------------------------------------------------
 # تنظیمات اصلی
@@ -15,58 +21,15 @@ BASE_URL = f"https://tapi.bale.ai/bot{TOKEN}"
 RENDER_EXTERNAL_HOSTNAME = os.environ.get("RENDER_EXTERNAL_HOSTNAME", "")
 WEBHOOK_URL = f"https://{RENDER_EXTERNAL_HOSTNAME}/webhook/{TOKEN}" if RENDER_EXTERNAL_HOSTNAME else ""
 
+ADMIN_ID = 52937597  # شناسه عددی ادمین در بله
 ADMIN_USERNAME = "Hobabadmin"
-ADMIN_CHAT_ID = 52937597  # شناسه چت شما در بله جهت دریافت درخواست‌های تایید
 
-# لینک تلگرامی ربات چک مانده حجم
 BALANCE_BOT_LINK = "https://t.me/reportvolume_bot"
 
-CARD_NUMBER = "5022-2913-3683-0904"
+CARD_NUMBER = "5022 2913 3683 0904"
 CARD_HOLDER = "علی باقری فرد"
 
-# الگوی نام کاربری معتبر سرور جهت تمدید: provpn + عدد انگلیسی (مثال: provpn27)
 RENEWAL_USERNAME_PATTERN = re.compile(r"^provpn[0-9]+$")
-
-# متن دکمه‌های کیبورد ثابت
-BUY_BUTTON_TEXT = "🛒 خرید اشتراک"
-RENEW_BUTTON_TEXT = "🔄 تمدید سرور"
-MY_SERVICES_BUTTON_TEXT = "📦 سرویس‌های من"
-CHECK_BALANCE_BUTTON_TEXT = "📊 چک کردن مانده سرویس"
-SUPPORT_BUTTON_TEXT = "🎧 پشتیبانی"
-HOME_BUTTON_TEXT = "🏠 منوی اصلی"
-
-# ---------------------------------------------------------------------------
-# وضعیت موقت هر کاربر (چون این ربات به‌صورت وب‌هوک و بدون حافظه‌ی مکالمه‌ست،
-# وضعیت در‌انتظارِ نام‌کاربری تمدید را در یک دیکشنری در حافظه نگه می‌داریم)
-# ---------------------------------------------------------------------------
-USER_STATE = {}
-
-
-def get_state(chat_id):
-    return USER_STATE.setdefault(
-        chat_id, {"awaiting_username": False, "username_attempts": 0, "renewal_username": None}
-    )
-
-
-def reset_state(chat_id):
-    USER_STATE[chat_id] = {"awaiting_username": False, "username_attempts": 0, "renewal_username": None}
-
-
-_EN2FA = str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
-
-
-def fa_num(n: int) -> str:
-    return f"{n:,}".translate(_EN2FA)
-
-
-def price_toman_text(price_thousand_toman: int) -> str:
-    return f"{fa_num(price_thousand_toman)} تومن"
-
-
-def price_rial_text(price_thousand_toman: int) -> str:
-    rial = price_thousand_toman * 10_000
-    return f"{fa_num(rial)} ریال"
-
 
 # ---------------------------------------------------------------------------
 # تعریف پلن‌ها
@@ -74,129 +37,219 @@ def price_rial_text(price_thousand_toman: int) -> str:
 PLANS = {
     "single": {
         "title": "🌀 تک کاربره",
-        "subcategories": {
-            "monthly": {
+        "subcats": {
+            "m1": {
                 "title": "✨ یک ماهه",
                 "items": [
-                    {"id": "sm1", "label": "یک ماه تک کاربر ۲۰ گیگ", "price": 240},
-                    {"id": "sm2", "label": "یک ماه تک کاربر ۴۰ گیگ", "price": 420},
-                    {"id": "sm3", "label": "یک ماه تک کاربر ۶۰ گیگ", "price": 550},
-                    {"id": "sm4", "label": "یک ماه تک کاربر ۱۰۰ گیگ", "price": 690},
+                    {"id": "s_m1_20", "label": "یکماه تک کاربر ۲۰ گیگ", "toman": 260},
+                    {"id": "s_m1_40", "label": "یکماه تک کاربر ۴۰ گیگ", "toman": 420, "recommended": True},
+                    {"id": "s_m1_60", "label": "یکماه تک کاربر ۶۰ گیگ", "toman": 550},
+                    {"id": "s_m1_100", "label": "یکماه تک کاربر ۱۰۰ گیگ", "toman": 690},
                 ],
             },
-            "quarterly": {
+            "m3": {
                 "title": "✨ سه ماهه",
                 "items": [
-                    {"id": "sq1", "label": "سه ماه تک کاربر ۱۰۰ گیگ", "price": 990},
-                    {"id": "sq2", "label": "سه ماه تک کاربر ۱۵۰ گیگ", "price": 1390},
-                    {"id": "sq3", "label": "سه ماه تک کاربر ۱۸۰ گیگ", "price": 1590},
+                    {"id": "s_m3_100", "label": "سه ماه تک کاربر ۱۰۰ گیگ", "toman": 1190, "recommended": True},
+                    {"id": "s_m3_150", "label": "سه ماه تک کاربر ۱۵۰ گیگ", "toman": 1390},
+                    {"id": "s_m3_180", "label": "سه ماه تک کاربر ۱۸۰ گیگ", "toman": 1590},
                 ],
             },
         },
     },
     "double": {
         "title": "🌀 دو کاربره",
-        "subcategories": {
-            "monthly": {
+        "subcats": {
+            "m1": {
                 "title": "✨ یک ماهه",
                 "items": [
-                    {"id": "dm1", "label": "یک ماه دو کاربر ۴۰ گیگ", "price": 540},
-                    {"id": "dm2", "label": "یک ماه دو کاربر ۶۰ گیگ", "price": 650},
-                    {"id": "dm3", "label": "یک ماه دو کاربر ۸۰ گیگ", "price": 750},
-                    {"id": "dm4", "label": "یک ماه دو کاربر ۱۰۰ گیگ", "price": 890},
+                    {"id": "d_m1_40", "label": "یکماه دو کاربر ۴۰ گیگ", "toman": 590},
+                    {"id": "d_m1_60", "label": "یکماه دو کاربر ۶۰ گیگ", "toman": 720},
+                    {"id": "d_m1_80", "label": "یکماه دو کاربر ۸۰ گیگ", "toman": 800, "recommended": True},
+                    {"id": "d_m1_100", "label": "یکماه دو کاربر ۱۰۰ گیگ", "toman": 890},
                 ],
             },
-            "quarterly": {
+            "m3": {
                 "title": "✨ سه ماهه",
                 "items": [
-                    {"id": "dq1", "label": "سه ماه دو کاربر ۱۰۰ گیگ", "price": 1190},
-                    {"id": "dq2", "label": "سه ماه دو کاربر ۲۰۰ گیگ", "price": 1790},
-                    {"id": "dq3", "label": "سه ماه دو کاربر ۳۶۰ گیگ", "price": 2090},
+                    {"id": "d_m3_100", "label": "سه ماه دو کاربر ۱۰۰ گیگ", "toman": 1490},
+                    {"id": "d_m3_200", "label": "سه ماه دو کاربر ۲۰۰ گیگ", "toman": 1990},
+                    {"id": "d_m3_360", "label": "سه ماه دو کاربر ۳۶۰ گیگ", "toman": 2390, "recommended": True},
                 ],
             },
         },
     },
 }
 
+BUY_BUTTON_TEXT = "🛒 خرید اشتراک"
+RENEW_BUTTON_TEXT = "🔄 تمدید سرور"
+PRICE_LIST_BUTTON_TEXT = "📋 لیست قیمت‌ها"
+MY_SERVICES_BUTTON_TEXT = "📦 سرویس‌های من"
+CHECK_BALANCE_BUTTON_TEXT = "📊 چک کردن مانده سرویس"
+SUPPORT_BUTTON_TEXT = "🎧 پشتیبانی"
+HOME_BUTTON_TEXT = "🏠 منوی اصلی"
+
+# ---------------------------------------------------------------------------
+# ابزارهای محاسباتی و زمان
+# ---------------------------------------------------------------------------
+TEHRAN_TZ = timezone(timedelta(hours=3, minutes=30))
+PERSIAN_TO_EN = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
+
+def now_dt() -> datetime:
+    return datetime.now(TEHRAN_TZ).replace(tzinfo=None)
+
+def _now() -> str:
+    return now_dt().strftime("%Y-%m-%d %H:%M")
+
+def to_persian_digits(text: str) -> str:
+    return str(text).translate(str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹"))
+
+def format_toman(amount: int) -> str:
+    return f"{to_persian_digits(f'{amount:,}')} تومن"
+
+def format_rial(amount_toman: int) -> str:
+    rial = amount_toman * 10_000
+    return f"{to_persian_digits(f'{rial:,}')} ریال"
+
+def parse_int(text: str) -> int:
+    digits = re.sub(r"\D", "", (text or "").translate(PERSIAN_TO_EN))
+    return int(digits) if digits else 0
 
 def find_plan(plan_id: str):
-    for cat_key, cat in PLANS.items():
-        for sub_key, sub in cat["subcategories"].items():
+    for cat_key, category in PLANS.items():
+        for sub_key, sub in category["subcats"].items():
             for item in sub["items"]:
                 if item["id"] == plan_id:
-                    return item, cat_key, sub_key
+                    return cat_key, sub_key, item
     return None, None, None
 
-
-def get_full_price_list_text():
-    return (
-        "💵 تعرفه های اشتراک های طرح پرو:\n\n"
-        "🌀 تک کاربره:\n\n"
-        "✨ یک ماهه:\n"
-        "یکماه تک کاربر ۲۰ گیگ ۲۴۰ تومن\n"
-        "یکماه تک کاربر ۴۰ گیگ ۴۲۰ تومن\n"
-        "یکماه تک کاربر ۶۰ گیگ ۵۵۰ تومن\n"
-        "یکماه تک کاربر ۱۰۰ گیگ ۶۹۰ تومن\n\n"
-        "✨ سه ماهه:\n"
-        "سه ماه تک کاربر ۱۰۰ گیگ ۹۹۰ تومن\n"
-        "سه ماه تک کاربر ۱۵۰ گیگ ۱۳۹۰ تومن\n"
-        "سه ماه تک کاربر ۱۸۰ گیگ ۱۵۹۰ تومن\n\n"
-        "🌀 دو کاربره:\n\n"
-        "✨ یک ماهه:\n"
-        "یکماه دو کاربر ۴۰ گیگ ۵۴۰ تومن\n"
-        "یکماه دو کاربر ۶۰ گیگ ۶۵۰ تومن\n"
-        "یکماه دو کاربر ۸۰ گیگ ۷۵۰ تومن\n"
-        "یکماه دو کاربر ۱۰۰ گیگ ۸۹۰ تومن\n\n"
-        "✨ سه ماهه:\n"
-        "سه ماه دو کاربر ۱۰۰ گیگ ۱۱۹۰ تومن\n"
-        "سه ماه دو کاربر ۲۰۰ گیگ ۱۷۹۰ تومن\n"
-        "سه ماه دو کاربر ۳۶۰ گیگ ۲۰۹۰ تومن\n\n"
-        "@HobabServices"
-    )
-
+def build_full_price_list_text() -> str:
+    lines = [
+        "💎 **لیست کلی تعرفه‌های اشتراک طرح پرو** 💎",
+        "🔥 = پلن پیشنهادی ما",
+        "────────────────────",
+        "",
+    ]
+    for cat_key in ("single", "double"):
+        cat = PLANS[cat_key]
+        lines.append(f"📌 **{cat['title']}**")
+        lines.append("")
+        for sub_key in ("m1", "m3"):
+            sub = cat["subcats"][sub_key]
+            lines.append(f"  🔹 {sub['title']}:")
+            for item in sub["items"]:
+                mark = "  🔥 (پیشنهادی)" if item.get("recommended") else ""
+                lines.append(f"     • {item['label']} ── 💰 **{format_toman(item['toman'])}**{mark}")
+            lines.append("")
+        lines.append("────────────────────")
+        lines.append("")
+    lines.append("📢 پشتیبانی: @Hobabadmin")
+    return "\n".join(lines).strip()
 
 # ---------------------------------------------------------------------------
-# دیتابیس
+# مدیریت دیتابیس Postgres (Neon)
 # ---------------------------------------------------------------------------
-DB_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "services.db")
+DATABASE_URL = os.environ.get("DATABASE_URL")
 
+def _db_execute(query: str, params: tuple = (), fetch: str = None):
+    if not DATABASE_URL:
+        raise RuntimeError("متغیر محیطی DATABASE_URL تنظیم نشده است.")
+    last_exc = None
+    for _attempt in range(2):
+        try:
+            with psycopg.connect(DATABASE_URL, connect_timeout=15) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(query, params)
+                    if fetch == "one":
+                        return cur.fetchone()
+                    if fetch == "all":
+                        return cur.fetchall()
+                    return None
+        except psycopg.OperationalError as exc:
+            last_exc = exc
+            logger.warning("DB connection problem, retrying: %s", exc)
+            time.sleep(1)
+    raise last_exc
 
 def init_db():
-    conn = sqlite3.connect(DB_FILE)
-    conn.execute(
+    _db_execute(
         """
-        CREATE TABLE IF NOT EXISTS user_services (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
+        CREATE TABLE IF NOT EXISTS orders (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL,
             plan_label TEXT NOT NULL,
-            activated_at TEXT NOT NULL
+            price TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at TEXT NOT NULL,
+            duration_days INTEGER,
+            amount_toman INTEGER,
+            created_ts TIMESTAMP,
+            confirmed_at TIMESTAMP,
+            expires_at TIMESTAMP,
+            renewal_username TEXT
         )
         """
     )
-    conn.commit()
-    conn.close()
-
-
-def add_user_service(user_id: int, plan_label: str):
-    now_str = datetime.now().strftime("%Y-%m-%d — %H:%M")
-    conn = sqlite3.connect(DB_FILE)
-    conn.execute(
-        "INSERT INTO user_services (user_id, plan_label, activated_at) VALUES (?, ?, ?)",
-        (user_id, plan_label, now_str)
+    _db_execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_state (
+            user_id BIGINT PRIMARY KEY,
+            pending_plan_id TEXT,
+            renewal_username TEXT,
+            awaiting_username BOOLEAN DEFAULT FALSE,
+            username_attempts INTEGER DEFAULT 0,
+            updated_at TEXT
+        )
+        """
     )
-    conn.commit()
-    conn.close()
+    _db_execute(
+        """
+        CREATE TABLE IF NOT EXISTS users (
+            user_id BIGINT PRIMARY KEY,
+            full_name TEXT,
+            username TEXT,
+            first_seen TEXT,
+            blocked BOOLEAN NOT NULL DEFAULT FALSE
+        )
+        """
+    )
+    _db_execute(
+        """
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+        """
+    )
+    apply_saved_settings()
 
+def apply_saved_settings():
+    global CARD_NUMBER, CARD_HOLDER
+    rows = _db_execute("SELECT key, value FROM settings", (), "all") or []
+    for key, value in rows:
+        if key == "card_number":
+            CARD_NUMBER = value
+        elif key == "card_holder":
+            CARD_HOLDER = value
+        elif key.startswith("price_"):
+            _, _, item = find_plan(key[len("price_"):])
+            if item:
+                try:
+                    item["toman"] = int(value)
+                except ValueError:
+                    pass
 
-def get_user_services(user_id: int):
-    conn = sqlite3.connect(DB_FILE)
-    rows = conn.execute(
-        "SELECT plan_label, activated_at FROM user_services WHERE user_id = ? ORDER BY id DESC",
-        (user_id,)
-    ).fetchall()
-    conn.close()
-    return rows
-
+def register_user(user_id: int, full_name: str, username: str):
+    try:
+        _db_execute(
+            "INSERT INTO users (user_id, full_name, username, first_seen, blocked) "
+            "VALUES (%s, %s, %s, %s, FALSE) "
+            "ON CONFLICT (user_id) DO UPDATE SET full_name = EXCLUDED.full_name, "
+            "username = EXCLUDED.username, blocked = FALSE",
+            (user_id, full_name, username, _now()),
+        )
+    except Exception:
+        logger.exception("register_user failed for user %s", user_id)
 
 # ---------------------------------------------------------------------------
 # API بله
@@ -210,9 +263,8 @@ def send_message(chat_id, text, reply_markup=None):
         r = requests.post(f"{BASE_URL}/sendMessage", json=payload, headers=headers, timeout=10)
         return r.json()
     except Exception as e:
-        print(f"sendMessage exception: {e}", file=sys.stderr)
+        logger.error(f"sendMessage exception: {e}")
         return None
-
 
 def edit_message_text(chat_id, message_id, text, reply_markup=None):
     payload = {"chat_id": chat_id, "message_id": message_id, "text": text}
@@ -223,9 +275,8 @@ def edit_message_text(chat_id, message_id, text, reply_markup=None):
         r = requests.post(f"{BASE_URL}/editMessageText", json=payload, headers=headers, timeout=10)
         return r.json()
     except Exception as e:
-        print(f"editMessageText exception: {e}", file=sys.stderr)
+        logger.error(f"editMessageText exception: {e}")
         return None
-
 
 def answer_callback_query(callback_query_id, text=None):
     payload = {"callback_query_id": callback_query_id}
@@ -235,191 +286,157 @@ def answer_callback_query(callback_query_id, text=None):
     try:
         requests.post(f"{BASE_URL}/answerCallbackQuery", json=payload, timeout=5)
     except Exception as e:
-        print(f"answerCallbackQuery exception: {e}", file=sys.stderr)
-
+        logger.error(f"answerCallbackQuery exception: {e}")
 
 # ---------------------------------------------------------------------------
 # کیبوردها
 # ---------------------------------------------------------------------------
 def persistent_keyboard():
-    # تمام آیتم‌های منوی اصلی در کنار «منوی اصلی» به صورت کیبورد ثابت نمایش داده می‌شوند
     return {
         "keyboard": [
             [{"text": BUY_BUTTON_TEXT}, {"text": RENEW_BUTTON_TEXT}],
-            [{"text": MY_SERVICES_BUTTON_TEXT}, {"text": CHECK_BALANCE_BUTTON_TEXT}],
-            [{"text": SUPPORT_BUTTON_TEXT}, {"text": HOME_BUTTON_TEXT}],
+            [{"text": PRICE_LIST_BUTTON_TEXT}, {"text": MY_SERVICES_BUTTON_TEXT}],
+            [{"text": CHECK_BALANCE_BUTTON_TEXT}, {"text": SUPPORT_BUTTON_TEXT}],
+            [{"text": HOME_BUTTON_TEXT}],
         ],
         "resize_keyboard": True
     }
-
 
 def main_menu_inline():
     return {
         "inline_keyboard": [
             [{"text": "🛒 خرید اشتراک", "callback_data": "plans"}],
             [{"text": "🔄 تمدید سرور", "callback_data": "renew"}],
+            [{"text": "📋 لیست قیمت‌ها", "callback_data": "all_prices"}],
             [{"text": "📦 سرویس‌های من", "callback_data": "my_services"}],
             [{"text": "📊 چک کردن مانده سرویس", "callback_data": "check_balance"}],
             [{"text": "🎧 پشتیبانی", "callback_data": "support"}]
         ]
     }
 
-
-def category_keyboard():
+def plans_keyboard():
     return {
         "inline_keyboard": [
-            [{"text": PLANS["single"]["title"], "callback_data": "cat_single"}],
-            [{"text": PLANS["double"]["title"], "callback_data": "cat_double"}],
-            [{"text": "📋 لیست کلی قیمت‌ها", "callback_data": "all_prices"}],
-            [{"text": "🔙 بازگشت", "callback_data": "back"}]
+            [{"text": "🔥 پلن‌های پیشنهادی", "callback_data": "recommended"}],
+            [{"text": "🌀 تک کاربره", "callback_data": "cat_single"}],
+            [{"text": "🌀 دو کاربره", "callback_data": "cat_double"}],
+            [{"text": "🔙 بازگشت به منوی اصلی", "callback_data": "back"}]
         ]
     }
 
-
-def subcategory_keyboard(cat_key):
-    cat = PLANS[cat_key]
-    rows = []
-    for sub_key, sub in cat["subcategories"].items():
-        rows.append([{"text": sub["title"], "callback_data": f"sub_{cat_key}_{sub_key}"}])
-    rows.append([{"text": "🔙 بازگشت", "callback_data": "plans"}])
-    return {"inline_keyboard": rows}
-
-
-def items_keyboard(cat_key, sub_key):
-    sub = PLANS[cat_key]["subcategories"][sub_key]
-    rows = []
-    for item in sub["items"]:
-        text = f"{item['label']} — {price_toman_text(item['price'])}"
-        rows.append([{"text": text, "callback_data": f"buy_{item['id']}"}])
-    rows.append([{"text": "🔙 بازگشت", "callback_data": f"cat_{cat_key}"}])
-    return {"inline_keyboard": rows}
-
-
-def build_my_services_text(chat_id):
-    services = get_user_services(chat_id)
-    if not services:
-        return "📦 هنوز هیچ سرویس فعالی برای شما ثبت نشده است."
-    text_lines = ["📦 **سرویس‌های شما:**\n"]
-    for label, activated_at in services:
-        text_lines.append(f"🔹 **اشتراک:** {label}\n⏱ **زمان فعال‌سازی:** {activated_at}\n---")
-    return "\n".join(text_lines)
-
-
-def start_renewal_flow(chat_id, message_id=None):
-    state = get_state(chat_id)
-    state["awaiting_username"] = True
-    state["username_attempts"] = 0
-
-    text = (
-        "🔄 تمدید سرور\n\n"
-        "لطفاً نام کاربری سرور OpenConnect خود را همینجا ارسال کنید.\n\n"
-        "📌 فرمت صحیح: کلمه‌ی provpn به همراه یک عدد انگلیسی، مثلاً:\n"
-        "provpn27 ✅"
+# ---------------------------------------------------------------------------
+# پردازش جریان‌ها و پیام‌ها
+# ---------------------------------------------------------------------------
+def reset_user_state(user_id):
+    _db_execute(
+        "INSERT INTO user_state (user_id, awaiting_username, username_attempts, pending_plan_id, renewal_username, updated_at) "
+        "VALUES (%s, FALSE, 0, NULL, NULL, %s) "
+        "ON CONFLICT (user_id) DO UPDATE SET awaiting_username = FALSE, username_attempts = 0, "
+        "pending_plan_id = NULL, updated_at = EXCLUDED.updated_at",
+        (user_id, _now())
     )
 
-    if message_id:
-        kb = {"inline_keyboard": [[{"text": "🔙 بازگشت", "callback_data": "back"}]]}
-        edit_message_text(chat_id, message_id, text, kb)
-    else:
-        send_message(chat_id, text, persistent_keyboard())
-
-
-def handle_renewal_username(chat_id, text):
-    """اگر ربات منتظر دریافت نام کاربری تمدید سرور از این کاربر باشد، پیام متنی را بررسی می‌کند.
-    خروجی True یعنی پیام مربوط به این جریان بوده و پردازش شد."""
-    state = get_state(chat_id)
-    if not state.get("awaiting_username"):
+def handle_renewal_username(chat_id, text, user_info):
+    row = _db_execute("SELECT awaiting_username, username_attempts FROM user_state WHERE user_id = %s", (chat_id,), "one")
+    if not row or not row[0]:
         return False
 
-    username = (text or "").strip()
+    username_input = (text or "").strip()
 
-    if RENEWAL_USERNAME_PATTERN.match(username):
-        state["awaiting_username"] = False
-        state["username_attempts"] = 0
-        state["renewal_username"] = username
-        send_message(chat_id, f"✅ نام کاربری شما با موفقیت تایید شد! ({username})")
-        send_message(chat_id, "لطفاً نوع اشتراک مورد نظر خود جهت تمدید را انتخاب کنید:", category_keyboard())
+    if RENEWAL_USERNAME_PATTERN.match(username_input):
+        _db_execute(
+            "UPDATE user_state SET awaiting_username = FALSE, username_attempts = 0, renewal_username = %s, updated_at = %s WHERE user_id = %s",
+            (username_input, _now(), chat_id)
+        )
+        send_message(chat_id, f"✅ نام کاربری شما با موفقیت تایید شد! (`{username_input}`)")
+        send_message(chat_id, "لطفاً نوع اشتراک مورد نظر خود جهت تمدید را انتخاب کنید:", plans_keyboard())
         return True
 
-    attempts = state.get("username_attempts", 0) + 1
-    state["username_attempts"] = attempts
+    attempts = (row[1] or 0) + 1
+    _db_execute("UPDATE user_state SET username_attempts = %s WHERE user_id = %s", (attempts, chat_id))
 
-    base_text = (
-        "❌ نام کاربری شما اشتباه است!\n\n"
-        "لطفاً دوباره با فرمت صحیح ارسال کنید، مثلاً:\n"
-        "provpn27"
-    )
-
+    base_text = "❌ نام کاربری شما اشتباه است!\n\nلطفاً دوباره با فرمت صحیح ارسال کنید، مثلاً:\nprovpn27"
     if attempts >= 2:
         kb = {"inline_keyboard": [[{"text": "💬 ارتباط با پشتیبانی", "url": f"https://ble.ir/{ADMIN_USERNAME}"}]]}
-        send_message(
-            chat_id,
-            base_text + "\n\nاگر در تایید نام کاربری مشکلی برایتان پیش آمده، لطفاً به پشتیبانی پیام دهید.",
-            kb,
-        )
+        send_message(chat_id, base_text + "\n\nاگر در تایید نام کاربری مشکلی پیش آمده به پشتیبانی پیام دهید.", kb)
     else:
         send_message(chat_id, base_text)
     return True
 
-
-# ---------------------------------------------------------------------------
-# پردازش پیام‌ها
-# ---------------------------------------------------------------------------
 def process_update(update):
     message = update.get("message") or update.get("edited_message")
     if message:
         chat_id = message.get("chat", {}).get("id")
+        user_info = message.get("from", {})
         text = message.get("text", "").strip()
 
+        if chat_id:
+            register_user(chat_id, user_info.get("first_name", ""), user_info.get("username", ""))
+
+        # دستورات ادمین
+        if chat_id == ADMIN_ID and text.startswith("/"):
+            if text == "/stats":
+                total = _db_execute("SELECT COUNT(*), COALESCE(SUM(amount_toman), 0) FROM orders WHERE status = 'confirmed'", (), "one")
+                users = _db_execute("SELECT COUNT(*) FROM users", (), "one")
+                send_message(ADMIN_ID, f"📊 آمار فروش:\n\nکل سفارشات تایید شده: {to_persian_digits(total[0])}\nمجموع فروش: {format_toman(total[1])}\nتعداد کاربران: {to_persian_digits(users[0])}")
+                return
+            elif text == "/prices":
+                lines = ["💰 لیست پلن‌ها:"]
+                for cat in PLANS.values():
+                    for sub in cat["subcats"].values():
+                        for item in sub["items"]:
+                            lines.append(f"`{item['id']}` — {item['label']} — {format_toman(item['toman'])}")
+                send_message(ADMIN_ID, "\n".join(lines))
+                return
+
         if text in ["/start", HOME_BUTTON_TEXT, "start"]:
-            reset_state(chat_id)
-            send_message(chat_id, "سلام، جهت خرید یا تمدید سرور در خدمتم😉", persistent_keyboard())
-            send_message(chat_id, "یکی از گزینه‌های زیر رو انتخاب کن:", main_menu_inline())
-            return
-
-        if text == "/myid":
-            send_message(chat_id, f"🆔 شناسه (Chat ID) شما در بله:\n`{chat_id}`")
-            return
-
-        if text == "/cancel":
-            state = get_state(chat_id)
-            had_active_flow = state.get("awaiting_username") is True
-            reset_state(chat_id)
-            reply = "❌ فرآیند جاری لغو شد و از آن خارج شدید." if had_active_flow else "چیزی برای لغو کردن وجود نداشت."
-            send_message(chat_id, reply, persistent_keyboard())
-            send_message(chat_id, "🏠 منوی اصلی:", main_menu_inline())
+            reset_user_state(chat_id)
+            send_message(chat_id, "سلام! به ربات حباب خوش آمدید 😉\nجهت خرید یا تمدید سرور OpenConnect در خدمتیم.", persistent_keyboard())
+            send_message(chat_id, "لطفاً یکی از گزینه‌های زیر را انتخاب کنید:", main_menu_inline())
             return
 
         if text == BUY_BUTTON_TEXT:
-            reset_state(chat_id)
-            send_message(chat_id, "💵 تعرفه اشتراک‌های طرح پرو:\n\nنوع اشتراک رو انتخاب کن:", category_keyboard())
+            reset_user_state(chat_id)
+            send_message(chat_id, "🛒 **بخش خرید اشتراک**\n\nلطفاً نوع اشتراک مورد نظر خود را انتخاب کنید:", plans_keyboard())
             return
 
         if text == RENEW_BUTTON_TEXT:
-            start_renewal_flow(chat_id)
+            reset_user_state(chat_id)
+            _db_execute("INSERT INTO user_state (user_id, awaiting_username, updated_at) VALUES (%s, TRUE, %s) ON CONFLICT (user_id) DO UPDATE SET awaiting_username = TRUE", (chat_id, _now()))
+            send_message(chat_id, "🔄 **تمدید سرور**\n\nلطفاً نام کاربری سرور خود را ارسال کنید (مثال: `provpn27`):", persistent_keyboard())
+            return
+
+        if text == PRICE_LIST_BUTTON_TEXT:
+            reset_user_state(chat_id)
+            send_message(chat_id, build_full_price_list_text())
             return
 
         if text == MY_SERVICES_BUTTON_TEXT:
-            reset_state(chat_id)
-            send_message(chat_id, build_my_services_text(chat_id))
+            reset_user_state(chat_id)
+            orders = _db_execute("SELECT plan_label, price, created_at FROM orders WHERE user_id = %s AND status = 'confirmed' ORDER BY id DESC", (chat_id,), "all") or []
+            if not orders:
+                send_message(chat_id, "📦 هنوز هیچ سرویس فعالی برای شما ثبت نشده است.")
+            else:
+                lines = ["📦 **سرویس‌های فعال شما:**\n"]
+                for label, price, created_at in orders:
+                    lines.append(f"✅ **{label}** — {price}\n🗓 تاریخ: {created_at}\n")
+                send_message(chat_id, "\n".join(lines))
             return
 
         if text == CHECK_BALANCE_BUTTON_TEXT:
-            reset_state(chat_id)
+            reset_user_state(chat_id)
             kb = {"inline_keyboard": [[{"text": "📊 چک کردن مانده", "url": BALANCE_BOT_LINK}]]}
-            send_message(chat_id, "📊 برای چک کردن مانده‌ی سرویست روی دکمه‌ی زیر بزن:", kb)
+            send_message(chat_id, "📊 برای بررسی مانده سرویس، روی دکمه زیر کلیک کنید:", kb)
             return
 
         if text == SUPPORT_BUTTON_TEXT:
-            reset_state(chat_id)
+            reset_user_state(chat_id)
             kb = {"inline_keyboard": [[{"text": "💬 ارتباط با پشتیبانی", "url": f"https://ble.ir/{ADMIN_USERNAME}"}]]}
-            send_message(chat_id, "🎧 برای پشتیبانی، روی دکمه‌ی زیر بزن تا مستقیم چت باز بشه:", kb)
+            send_message(chat_id, "🎧 برای دریافت پشتیبانی، روی دکمه زیر کلیک کنید:", kb)
             return
 
-        # هندلر عمومی متن: بررسی نام کاربری تمدید سرور (کمترین اولویت)
-        if chat_id is not None:
-            handle_renewal_username(chat_id, text)
-        return
+        if handle_renewal_username(chat_id, text, user_info):
+            return
 
     cb = update.get("callback_query")
     if cb:
@@ -429,147 +446,111 @@ def process_update(update):
         msg_id = msg.get("message_id")
         chat_id = msg.get("chat", {}).get("id")
         user_info = cb.get("from", {})
-        first_name = user_info.get("first_name", "کاربر")
-        username = user_info.get("username", "")
 
         if cb_id:
             answer_callback_query(cb_id)
-
         if not chat_id:
             return
 
         if cb_data == "plans":
-            edit_message_text(chat_id, msg_id, "💵 تعرفه اشتراک‌های طرح پرو:\n\nنوع اشتراک رو انتخاب کن:", category_keyboard())
-
-        elif cb_data == "renew":
-            start_renewal_flow(chat_id, message_id=msg_id)
+            edit_message_text(chat_id, msg_id, "🛒 **بخش خرید اشتراک**\n\nلطفاً نوع اشتراک مورد نظر را انتخاب کنید:", plans_keyboard())
 
         elif cb_data == "all_prices":
-            kb = {"inline_keyboard": [
-                [{"text": "🛒 ثبت سفارش", "callback_data": "plans"}],
-                [{"text": "🔙 بازگشت", "callback_data": "plans"}]
-            ]}
-            edit_message_text(chat_id, msg_id, get_full_price_list_text(), kb)
+            edit_message_text(chat_id, msg_id, build_full_price_list_text())
 
         elif cb_data.startswith("cat_"):
             cat_key = cb_data.replace("cat_", "")
             if cat_key in PLANS:
-                cat = PLANS[cat_key]
-                edit_message_text(chat_id, msg_id, f"{cat['title']}\n\nمدت اشتراک رو انتخاب کن:", subcategory_keyboard(cat_key))
+                kb = {
+                    "inline_keyboard": [
+                        [{"text": "✨ یک ماهه", "callback_data": f"sub_{cat_key}_m1"}],
+                        [{"text": "✨ سه ماهه", "callback_data": f"sub_{cat_key}_m3"}],
+                        [{"text": "🔙 بازگشت", "callback_data": "plans"}]
+                    ]
+                }
+                edit_message_text(chat_id, msg_id, f"✨ **{PLANS[cat_key]['title']}**\n\nمدت زمان را انتخاب کنید:", kb)
 
         elif cb_data.startswith("sub_"):
-            parts = cb_data.split("_")
-            if len(parts) == 3:
-                cat_key, sub_key = parts[1], parts[2]
-                if cat_key in PLANS and sub_key in PLANS[cat_key]["subcategories"]:
-                    cat = PLANS[cat_key]
-                    sub = cat["subcategories"][sub_key]
-                    text = f"{cat['title']}\n{sub['title']}\n\nپلن مورد نظرت رو انتخاب کن:"
-                    edit_message_text(chat_id, msg_id, text, items_keyboard(cat_key, sub_key))
+            _, cat_key, sub_key = cb_data.split("_", 2)
+            sub = PLANS[cat_key]["subcats"][sub_key]
+            rows = []
+            for item in sub["items"]:
+                prefix = "🔥 " if item.get("recommended") else ""
+                rows.append([{"text": f"{prefix}{item['label']} — {format_toman(item['toman'])}", "callback_data": f"buy_{item['id']}"}])
+            rows.append([{"text": "🔙 بازگشت", "callback_data": f"cat_{cat_key}"}])
+            edit_message_text(chat_id, msg_id, f"⚡️ **{PLANS[cat_key]['title']} — {sub['title']}**\n\nپلن مورد نظر را انتخاب کنید:", {"inline_keyboard": rows})
 
         elif cb_data.startswith("buy_"):
             plan_id = cb_data.replace("buy_", "")
-            plan, cat_key, sub_key = find_plan(plan_id)
+            cat_key, sub_key, plan = find_plan(plan_id)
             if plan:
-                state = get_state(chat_id)
-                renewal_username = state.get("renewal_username")
-                renewal_note = f"🔄 نام کاربری جهت تمدید: {renewal_username}\n\n" if renewal_username else ""
+                state_row = _db_execute("SELECT renewal_username FROM user_state WHERE user_id = %s", (chat_id,), "one")
+                renewal_username = state_row[0] if state_row else None
+                renewal_note = f"🔄 **نام کاربری جهت تمدید:** `{renewal_username}`\n\n" if renewal_username else ""
 
                 text = (
                     f"{renewal_note}"
-                    f"✅ پلن انتخابی: {plan['label']}\n"
-                    f"💰 مبلغ: {price_toman_text(plan['price'])}\n"
-                    f"💱 معادل این میشه: {price_rial_text(plan['price'])}\n\n"
-                    f"لطفاً مبلغ رو به شماره کارت زیر واریز کن:\n\n"
-                    f"💳 `{CARD_NUMBER}`\n"
-                    f"👤 به نام: {CARD_HOLDER}\n\n"
-                    f"⚠️ **توجه:** پس از پرداخت، رسید واریز را همراه با آیدی زیر برای پشتیبانی بفرستید:\n\n"
+                    f"✅ **پلن انتخابی:** {plan['label']}\n"
+                    f"💰 **مبلغ:** {format_toman(plan['toman'])}\n"
+                    f"💱 **معادل ریالی:** {format_rial(plan['toman'])}\n\n"
+                    f"────────────────────\n"
+                    f"💳 **شماره کارت جهت واریز:**\n"
+                    f"`{CARD_NUMBER}`\n"
+                    f"👤 **به نام:** {CARD_HOLDER}\n"
+                    f"────────────────────\n\n"
+                    f"⚠️ **توجه:** پس از پرداخت، لطفاً **عکس رسید واریز** را همراه با اطلاعات زیر مستقیماً به پی‌وی پشتیبانی ارسال کنید:\n\n"
                     f"🆔 **آیدی (Chat ID) شما:** `{chat_id}`"
                 )
-                back_kb = {"inline_keyboard": [
-                    [{"text": "💬 ارسال رسید به مدیریت", "url": f"https://ble.ir/{ADMIN_USERNAME}"}],
+                
+                kb = {"inline_keyboard": [
+                    [{"text": "💬 ارسال رسید به پی‌وی پشتیبانی", "url": f"https://ble.ir/{ADMIN_USERNAME}"}],
                     [{"text": "🔙 بازگشت", "callback_data": f"sub_{cat_key}_{sub_key}"}]
                 ]}
-                edit_message_text(chat_id, msg_id, text, back_kb)
+                edit_message_text(chat_id, msg_id, text, kb)
 
-                # ارسال درخواست تایید برای شما (ادمین) همراه با دکمه تایید
-                admin_renewal_line = f"🔄 **نام کاربری جهت تمدید:** `{renewal_username}`\n" if renewal_username else ""
+                # ثبت سفارش اولیه و ارسال پیام به ادمین همراه با دکمه تایید
+                order_id = _db_execute(
+                    "INSERT INTO orders (user_id, plan_label, price, status, created_at, created_ts, amount_toman, duration_days, renewal_username) "
+                    "VALUES (%s, %s, %s, 'pending', %s, %s, %s, %s, %s) RETURNING id",
+                    (chat_id, plan['label'], format_toman(plan['toman']), _now(), now_dt(), plan['toman'], 30 if sub_key == 'm1' else 90, renewal_username),
+                    "one"
+                )[0]
+
                 admin_msg = (
-                    f"🔔 **درخواست سفارش جدید**\n\n"
-                    f"👤 **کاربر:** {first_name} (@{username if username else 'بدون_نام_کاربری'})\n"
+                    f"🔔 **درخواست سفارش جدید (#{order_id})**\n\n"
+                    f"👤 **کاربر:** {user_info.get('first_name', '')} (@{user_info.get('username', 'ندارد')})\n"
                     f"🆔 **Chat ID:** `{chat_id}`\n"
-                    f"{admin_renewal_line}"
-                    f"📦 **پلن انتخابی:** {plan['label']}\n"
-                    f"💰 **مبلغ:** {price_toman_text(plan['price'])}\n\n"
-                    f"پس از بررسی و واریز وجه، روی دکمه زیر کلیک کنید تا سرویس برای این کاربر فعال شود:"
+                    f"{'🔄 نام کاربری تمدید: `' + str(renewal_username) + '`\n' if renewal_username else ''}"
+                    f"📦 **پلن:** {plan['label']}\n"
+                    f"💰 **مبلغ:** {format_toman(plan['toman'])}\n\n"
+                    f"کاربر برای ارسال رسید به پی‌وی هدایت شد. پس از دریافت فیش و تایید، دکمه زیر را بزنید:"
                 )
-                admin_kb = {"inline_keyboard": [
-                    [{"text": "✅ تایید و فعال‌سازی سرویس", "callback_data": f"approve_{chat_id}_{plan['id']}"}]
-                ]}
-                send_message(ADMIN_CHAT_ID, admin_msg, admin_kb)
+                admin_kb = {"inline_keyboard": [[{"text": "✅ تایید و فعال‌سازی سرویس", "callback_data": f"approve_{order_id}"}]]}
+                send_message(ADMIN_ID, admin_msg, admin_kb)
 
-                state["renewal_username"] = None
-
-        # پردازش کلیک روی دکمه تایید توسط ادمین
         elif cb_data.startswith("approve_"):
-            parts = cb_data.split("_")
-            if len(parts) == 3:
-                target_user_id = int(parts[1])
-                plan_id = parts[2]
-                plan, _, _ = find_plan(plan_id)
-                if plan:
-                    add_user_service(target_user_id, plan['label'])
-                    
-                    # ویرایش پیام ادمین و تایید نهایی
-                    edit_message_text(
-                        chat_id, msg_id,
-                        f"✅ **سرویس فعال شد!**\n\n"
-                        f"👤 **کاربر:** `{target_user_id}`\n"
-                        f"📦 **پلن:** {plan['label']}\n"
-                        f"⏱ **زمان فعال‌سازی:** {datetime.now().strftime('%Y-%m-%d — %H:%M')}"
-                    )
-                    
-                    # اطلاع‌رسانی خودکار به کاربر
-                    send_message(
-                        target_user_id,
-                        f"🎉 **پرداخت شما تایید شد!**\n\n"
-                        f"اشتراک «{plan['label']}» با موفقیت برای شما فعال شد.\n"
-                        f"می‌توانید اطلاعات آن را در بخش «سرویس‌های من» مشاهده کنید."
-                    )
-                    answer_callback_query(cb_id, "سرویس با موفقیت فعال شد.")
-
-        elif cb_data == "my_services":
-            text = build_my_services_text(chat_id)
-            kb = {"inline_keyboard": [[{"text": "🔙 بازگشت", "callback_data": "back"}]]}
-            edit_message_text(chat_id, msg_id, text, kb)
-
-        elif cb_data == "support":
-            kb = {"inline_keyboard": [
-                [{"text": "💬 ارتباط با پشتیبانی", "url": f"https://ble.ir/{ADMIN_USERNAME}"}],
-                [{"text": "🔙 بازگشت", "callback_data": "back"}]
-            ]}
-            edit_message_text(chat_id, msg_id, "🎧 برای پشتیبانی، روی دکمه‌ی زیر بزن تا مستقیم چت باز بشه:", kb)
-
-        elif cb_data == "check_balance":
-            kb = {"inline_keyboard": [
-                [{"text": "📊 چک کردن مانده", "url": BALANCE_BOT_LINK}],
-                [{"text": "🔙 بازگشت", "callback_data": "back"}]
-            ]}
-            edit_message_text(chat_id, msg_id, "📊 برای چک کردن مانده‌ی سرویست روی دکمه‌ی زیر بزن:", kb)
+            if chat_id != ADMIN_ID:
+                return
+            order_id = int(cb_data.split("_")[1])
+            order = _db_execute("SELECT user_id, plan_label FROM orders WHERE id = %s AND status = 'pending'", (order_id,), "one")
+            if order:
+                _db_execute("UPDATE orders SET status = 'confirmed', confirmed_at = %s WHERE id = %s", (now_dt(), order_id))
+                target_user, plan_label = order[0], order[1]
+                edit_message_text(chat_id, msg_id, f"✅ **سفارش #{order_id} تایید و فعال گردید.**")
+                send_message(target_user, f"✅ پرداخت شما تایید شد! سرویس «{plan_label}» با موفقیت فعال گردید.")
+            else:
+                answer_callback_query(cb_id, "این سفارش قبلاً تعیین تکلیف شده است.")
 
         elif cb_data == "back":
-            reset_state(chat_id)
+            reset_user_state(chat_id)
             edit_message_text(chat_id, msg_id, "🏠 منوی اصلی:", main_menu_inline())
-
 
 app = Flask(__name__)
 init_db()
 
-
 @app.route("/", methods=["GET"])
 def index():
-    return "Bot is running on Render."
-
+    return "Bale Bot running with Neon DB."
 
 @app.route(f"/webhook/{TOKEN}", methods=["POST"])
 def webhook():
@@ -577,7 +558,6 @@ def webhook():
     if data:
         process_update(data)
     return "OK", 200
-
 
 if WEBHOOK_URL:
     try:
